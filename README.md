@@ -333,6 +333,7 @@ run when `CLAP_TEST_BROWSER=1` is set (after `playwright install chromium`).
 | HUD shows LINK OFFLINE | Start the backend (`python clap.py --web` or `--voice`) and check `WEB_PORT` |
 | "Missing required environment variables: GEMINI_API_KEY" | Add `GEMINI_API_KEY` to `.env` |
 | "The Gemini API key is invalid." | Create a new key in AI Studio; check for stray spaces or quotes in `.env` |
+| "This API key cannot be used with the Gemini API." | The key is not a Gemini API key (e.g. a Google Cloud / Vertex AI key). Create one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
 | "Gemini quota has been reached…" | Wait, or switch `GEMINI_MODEL`; see *Free tier and rate limits* |
 | "The Gemini model … is not available." | Run `python -m ai models` and set `GEMINI_MODEL` to one listed |
 | "The Gemini API is not available in your region." | Gemini API region restrictions apply |

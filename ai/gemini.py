@@ -158,6 +158,13 @@ def to_clap_error(exc: Exception, model: str) -> ClapAIError:
         message, details = str(exc.message or ""), _details_text(exc)
         if "API_KEY_INVALID" in details or "API key not valid" in message or "API key expired" in message:
             return ClapAIError("The Gemini API key is invalid.")
+        # Keys that are not Gemini API keys (e.g. restricted Google Cloud keys).
+        if "API_KEY_SERVICE_BLOCKED" in details or "API keys are not supported by this API" in message:
+            return ClapAIError(
+                "This API key cannot be used with the Gemini API. "
+                "Create a Gemini API key in Google AI Studio.")
+        if "SERVICE_DISABLED" in details:
+            return ClapAIError("The Gemini API is not enabled for this key's Google Cloud project.")
         if code == 429 or status == "RESOURCE_EXHAUSTED":
             if re.search(r"limit:\s*0\b", message):
                 return ClapAIError(
@@ -172,7 +179,9 @@ def to_clap_error(exc: Exception, model: str) -> ClapAIError:
             return ClapAIError(f"The Gemini model {model} is not available. Check GEMINI_MODEL.")
         if "location is not supported" in message.lower():
             return ClapAIError("The Gemini API is not available in your region.")
-        if code in (401, 403) or status in ("PERMISSION_DENIED", "UNAUTHENTICATED"):
+        if code == 401 or status == "UNAUTHENTICATED":
+            return ClapAIError("The Gemini API key was rejected.")
+        if code == 403 or status == "PERMISSION_DENIED":
             return ClapAIError("The Gemini API key is not permitted to use this model.")
         if code == 503 or status == "UNAVAILABLE":
             return ClapAIError("Gemini is temporarily overloaded. Try again in a moment.")
