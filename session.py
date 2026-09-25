@@ -39,7 +39,7 @@ class ClapSession:
     def __init__(self, speak_replies: bool = False, voice_mode: bool = False) -> None:
         """
         speak_replies: speak every reply through the voice service.
-        voice_mode:    ask Claude for short, speakable replies.
+        voice_mode:    ask the AI for short, speakable replies.
         """
         self.speak_replies = speak_replies
         self.voice_mode = voice_mode

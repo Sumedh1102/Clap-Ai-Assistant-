@@ -11,8 +11,8 @@ if str(ROOT) not in sys.path:
 
 TMP = tempfile.mkdtemp(prefix="clap-tests-")
 os.environ["DB_PATH"] = os.path.join(TMP, "test.db")
-os.environ["ANTHROPIC_API_KEY"] = "test-key"
-for var in ("CLAP_TTS_PROVIDER", "CLAP_TTS_API_KEY", "CLAP_TTS_VOICE_ID", "CLAP_TTS_MODEL_ID", "USER_NAME", "CLAP_MODEL"):
+os.environ["GEMINI_API_KEY"] = "test-key"
+for var in ("CLAP_TTS_PROVIDER", "CLAP_TTS_API_KEY", "CLAP_TTS_VOICE_ID", "CLAP_TTS_MODEL_ID", "USER_NAME", "GEMINI_MODEL"):
     os.environ[var] = ""
 
 from database import init_db  # noqa: E402

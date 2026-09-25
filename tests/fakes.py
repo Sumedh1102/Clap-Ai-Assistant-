@@ -1,57 +1,37 @@
-"""Test doubles: scripted Claude responses, a recording player, a fake TTS provider."""
+"""Test doubles: a scripted AI provider, a recording player, a fake TTS provider."""
 
 from __future__ import annotations
 
 import threading
 import time
 
-import httpx
-from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
+from ai.base import AIProvider, ModelTurn, ToolCall
 
 
-def message(stop_reason: str, *blocks) -> Message:
-    return Message.model_construct(
-        id="msg_test", type="message", role="assistant", model="test-model",
-        content=list(blocks), stop_reason=stop_reason, stop_sequence=None,
-        usage=Usage(input_tokens=1, output_tokens=1),
-    )
+def turn(text: str = "", *calls: ToolCall, finish: str = "stop") -> ModelTurn:
+    return ModelTurn(text=text, tool_calls=list(calls), finish=finish)
 
 
-def text(t: str) -> TextBlock:
-    return TextBlock(type="text", text=t)
+def call(name: str, args: dict | None = None, id: str | None = None) -> ToolCall:
+    return ToolCall(name=name, args=args or {}, id=id)
 
 
-def tool_use(name: str, inputs: dict, id: str = "toolu_1") -> ToolUseBlock:
-    return ToolUseBlock(type="tool_use", id=id, name=name, input=inputs)
+class ScriptedAI(AIProvider):
+    """AIProvider double: each generate() returns (or raises) the next scripted item."""
 
-
-class ScriptedMessages:
-    """Stands in for client.messages; each create() pops the next scripted response."""
+    name = "scripted"
 
     def __init__(self, responses):
+        super().__init__("test-model")
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def create(self, **kwargs):
-        # Snapshot the messages list: the agent keeps appending to the same list.
-        self.calls.append({**kwargs, "messages": list(kwargs["messages"])})
+    def generate(self, system, messages, tools):
+        self.calls.append({"system": system, "messages": [dict(m) for m in messages], "tools": tools})
         item = self.responses.pop(0)
         if isinstance(item, Exception):
             raise item
-        return item(kwargs) if callable(item) else item
-
-
-class FakeClient:
-    def __init__(self, responses):
-        self.messages = ScriptedMessages(responses)
-
-
-def request() -> httpx.Request:
-    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-
-
-def status_response(code: int) -> httpx.Response:
-    return httpx.Response(code, request=request())
+        return item
 
 
 class RecordingPlayer:

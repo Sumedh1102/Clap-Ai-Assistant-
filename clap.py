@@ -72,6 +72,23 @@ ONLINE_GREETING = "CLAP online."
 log = logging.getLogger("clap")
 
 
+class _RedactSecrets(logging.Filter):
+    """Never let an API key or password reach a log file."""
+
+    def __init__(self, secrets: list) -> None:
+        super().__init__()
+        self._secrets = [x for x in secrets if x and len(x) >= 6]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._secrets:
+            message = record.getMessage()
+            if any(x in message for x in self._secrets):
+                for x in self._secrets:
+                    message = message.replace(x, "[redacted]")
+                record.msg, record.args = message, ()
+        return True
+
+
 def _setup_logging() -> None:
     """Technical details go to logs/clap.log; the console shows user-facing text only."""
     config.LOG_DIR.mkdir(exist_ok=True)
@@ -79,11 +96,15 @@ def _setup_logging() -> None:
         config.LOG_DIR / "clap.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
     )
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.addFilter(_RedactSecrets([
+        config.GEMINI_API_KEY, config.TTS_API_KEY, config.BRAVE_API_KEY, config.GMAIL_APP_PASSWORD,
+    ]))
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(handler)
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("google_genai").setLevel(logging.WARNING)
     logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 
 
@@ -216,7 +237,7 @@ def run_cli(initial_message: str = "") -> None:
 def run_voice(args) -> None:
     """
     Voice mode: persistent microphone stream, wake word "CLAP", Whisper STT,
-    Claude + tools, spoken reply. The HUD (web) and the floating overlay both
+    AI (Gemini) + tools, spoken reply. The HUD (web) and the floating overlay both
     mirror the real state from the event hub.
     """
     import voice

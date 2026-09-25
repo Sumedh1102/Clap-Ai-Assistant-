@@ -22,17 +22,24 @@ def _default_db_path() -> str:
     return "clap.db"
 
 
+# Default Gemini model: a current Flash model for fast, tool-calling conversation.
+# Override with GEMINI_MODEL in .env (`python -m ai models` lists what your key can use).
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+
+
 class Config:
     ASSISTANT_NAME: str = "CLAP"
 
-    ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+    # ── AI (Google Gemini) ────────────────────────────────────────────────────
+    GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "").strip()
+    MODEL: str = os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL
+    AI_PROVIDER: str = "gemini"
+
     BRAVE_API_KEY: str = os.environ.get("BRAVE_API_KEY", "")
     GMAIL_ADDRESS: str = os.environ.get("GMAIL_ADDRESS", "")
     GMAIL_APP_PASSWORD: str = os.environ.get("GMAIL_APP_PASSWORD", "")
     DEFAULT_EMAIL: str = os.environ.get("DEFAULT_EMAIL", "")
     DB_PATH: str = os.environ.get("DB_PATH") or _default_db_path()
-    MODEL: str = os.environ.get("CLAP_MODEL", "claude-opus-4-6")
-    MAX_TOKENS: int = 4096
     HISTORY_LIMIT: int = 40
     PICOVOICE_ACCESS_KEY: str = os.environ.get("PICOVOICE_ACCESS_KEY", "")
     MORNING_BRIEFING_TIME: str = os.environ.get("MORNING_BRIEFING_TIME", "08:00")
@@ -52,8 +59,8 @@ class Config:
     def validate(self) -> list[str]:
         """Return list of missing required keys."""
         missing = []
-        if not self.ANTHROPIC_API_KEY:
-            missing.append("ANTHROPIC_API_KEY")
+        if not self.GEMINI_API_KEY:
+            missing.append("GEMINI_API_KEY")
         return missing
 
 

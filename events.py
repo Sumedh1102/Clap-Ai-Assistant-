@@ -1,7 +1,7 @@
 """
 CLAP event hub — the single source of truth for what the assistant is doing.
 
-Everything that changes CLAP's observable state (microphone capture, Claude
+Everything that changes CLAP's observable state (microphone capture, AI
 calls, tool execution, speech playback, errors) reports here. Subscribers
 (the web HUD via server-sent events, the floating overlay) receive the same
 events, so every surface reflects real application activity.

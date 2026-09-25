@@ -1,4 +1,4 @@
-"""Daily briefing data — gathers tasks and time context for Claude to narrate."""
+"""Daily briefing data — gathers tasks and time context for the AI to narrate."""
 
 from datetime import date, datetime
 

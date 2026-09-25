@@ -1,21 +1,24 @@
 """
-CLAP agent — Claude reasoning with tool use.
+CLAP agent — the reasoning loop, independent of the AI provider.
 
 Loop:
-  1. Append user message → call Claude
-  2. If stop_reason == "tool_use" → run tools → feed results back → loop
+  1. Append the user message → ask the model (ai.get_provider(), Gemini)
+  2. If the model requests tools → run CLAP's tools → return real results → loop
   3. Otherwise → return the final text
 
-Failures of the AI service surface as ClapAIError with a short, user-facing
-message; technical details go to the log, never to the user.
+The model only ever sees real tool results; failures are returned as failures.
+Service problems surface as ClapAIError with a short, user-facing message;
+technical details go to the log.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime
 
-import anthropic
-
+import ai
+from ai import ClapAIError  # re-exported: session.py / clap.py import it from here
 from config import config
 from database import save_message
 from tools.apps import close_application, open_application
@@ -37,13 +40,16 @@ from tools.tasks import add_task, delete_task, list_tasks, update_task
 
 log = logging.getLogger("clap.agent")
 
+# Tools are declared as neutral JSON Schema ({"name", "description", "parameters"});
+# the provider adapter (ai/gemini.py) converts them to its function-calling format.
+
 # ── Tool definitions ──────────────────────────────────────────────────────────
 
 TOOLS: list[dict] = [
     {
         "name": "add_task",
-        "description": "Add a new task to the task manager.",
-        "input_schema": {
+        "description": "Create a task in the user's local task list. Use when the user asks to add, remember to do, or schedule a to-do. Returns the new task ID.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "Short task title"},
@@ -56,8 +62,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "list_tasks",
-        "description": "List tasks with optional filters.",
-        "input_schema": {
+        "description": "List tasks from the local task list, optionally filtered by status, priority, or due today. Use before updating or deleting tasks to find their IDs.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled", "all"]},
@@ -68,8 +74,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "update_task",
-        "description": "Update an existing task.",
-        "input_schema": {
+        "description": "Update an existing task by ID (title, description, priority, status, due date). Mark a task done with status=completed.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "integer"},
@@ -84,8 +90,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "delete_task",
-        "description": "Permanently delete a task by ID.",
-        "input_schema": {
+        "description": "Permanently delete a task by ID. Irreversible: confirm with the user first unless they explicitly asked to delete that task.",
+        "parameters": {
             "type": "object",
             "properties": {"task_id": {"type": "integer"}},
             "required": ["task_id"],
@@ -93,8 +99,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "send_email",
-        "description": "Send an email via Gmail.",
-        "input_schema": {
+        "description": "Send an email through the user's Gmail account. Confirm recipient, subject and body with the user before sending unless they gave all of them explicitly. Fails if Gmail is not configured.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "to": {"type": "string"},
@@ -108,8 +114,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "send_email_with_attachment",
-        "description": "Send an email with a local file attached.",
-        "input_schema": {
+        "description": "Send an email with a local file attached through Gmail. Confirm before sending. Fails if Gmail is not configured or the file does not exist.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "to": {"type": "string"},
@@ -123,8 +129,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "search_web",
-        "description": "Search the web with Brave Search for current information.",
-        "input_schema": {
+        "description": "Search the web (Brave Search) for current information, news, or facts you do not know. Fails with a clear message if search is not configured.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
@@ -135,8 +141,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "open_application",
-        "description": "Open/launch an application on the computer.",
-        "input_schema": {
+        "description": "Open (launch) a macOS application by name, e.g. \"Spotify\" or \"Safari\". The result says whether it really opened; if not, tell the user it could not be opened and why.",
+        "parameters": {
             "type": "object",
             "properties": {"app_name": {"type": "string"}},
             "required": ["app_name"],
@@ -144,8 +150,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "close_application",
-        "description": "Quit/close a running application.",
-        "input_schema": {
+        "description": "Quit a running macOS application by name. Reports failure if the app is not running.",
+        "parameters": {
             "type": "object",
             "properties": {"app_name": {"type": "string"}},
             "required": ["app_name"],
@@ -153,13 +159,13 @@ TOOLS: list[dict] = [
     },
     {
         "name": "get_daily_briefing",
-        "description": "Retrieve task and time data for the daily morning briefing.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": "Get today's task data (due today, overdue, high priority) for a daily briefing or when the user asks what is on their plate.",
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "get_current_datetime",
-        "description": "Get the current date, time, and day of week.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": "Get the current local date, time and day of week. Use for any question involving today, now, or relative dates.",
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "search_knowledge",
@@ -168,7 +174,7 @@ TOOLS: list[dict] = [
             "conversations relevant to the query. Call this before answering factual "
             "questions or when context about past work may help."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search terms"},
@@ -179,8 +185,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "add_knowledge",
-        "description": "Save a note, fact, or piece of information to the knowledge base for future reference.",
-        "input_schema": {
+        "description": "Save a note, fact, or preference to the user's long-term memory (knowledge base). Use when the user says remember/note that, or shares something worth keeping.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "The text to save"},
@@ -192,8 +198,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "browser_navigate",
-        "description": "Open a URL in the automated browser (Chrome if installed, otherwise Chromium).",
-        "input_schema": {
+        "description": "Open a URL in CLAP's automated browser (Chrome if installed, otherwise Chromium). Use for opening or reading web pages. Returns the final URL and page title.",
+        "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"],
@@ -201,16 +207,16 @@ TOOLS: list[dict] = [
     },
     {
         "name": "browser_get_text",
-        "description": "Extract visible text from the current browser page.",
-        "input_schema": {
+        "description": "Read the visible text of the page currently open in the automated browser (optionally a CSS selector). Text is truncated to about 8000 characters.",
+        "parameters": {
             "type": "object",
             "properties": {"selector": {"type": "string", "description": "CSS selector (default: body)"}},
         },
     },
     {
         "name": "browser_click",
-        "description": "Click an element on the current page by CSS selector or visible text.",
-        "input_schema": {
+        "description": "Click an element on the current browser page, by visible text (preferred) or CSS selector.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "selector": {"type": "string"},
@@ -220,8 +226,8 @@ TOOLS: list[dict] = [
     },
     {
         "name": "browser_fill",
-        "description": "Fill a text input on the current page.",
-        "input_schema": {
+        "description": "Type a value into an input on the current browser page (CSS selector). Set submit=true to press Enter. Confirm before submitting forms that send, buy, or change something.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "selector": {"type": "string"},
@@ -233,21 +239,21 @@ TOOLS: list[dict] = [
     },
     {
         "name": "browser_screenshot",
-        "description": "Take a screenshot of the current browser page.",
-        "input_schema": {
+        "description": "Save a screenshot of the current browser page to a file and return its path.",
+        "parameters": {
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Optional save path"}},
         },
     },
     {
         "name": "browser_current_url",
-        "description": "Get the current browser URL and page title.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": "Get the URL and title of the page currently open in the automated browser.",
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "browser_close",
-        "description": "Close the automated browser window.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": "Close CLAP's automated browser.",
+        "parameters": {"type": "object", "properties": {}},
     },
 ]
 
@@ -308,7 +314,8 @@ def dispatch_tool(name: str, inputs: dict) -> str:
 
 _SYSTEM_BASE = """\
 You are CLAP, a personal AI assistant running on the user's Mac. CLAP is an original \
-assistant, not a character from any film or franchise. Your name is pronounced "clap".
+assistant, not a character from any film or franchise. Your name is pronounced "clap". \
+Do not mention the underlying AI model or provider unless the user explicitly asks.
 
 VOICE & TONE
 - Intelligent, calm, concise and natural, with a quietly futuristic precision.
@@ -372,79 +379,64 @@ def _build_system(voice_mode: bool = False) -> str:
     return prompt
 
 
-# ── Errors ────────────────────────────────────────────────────────────────────
-
-class ClapAIError(RuntimeError):
-    """The AI service could not produce a reply. `user_message` is safe to show/speak."""
-
-    def __init__(self, user_message: str) -> None:
-        super().__init__(user_message)
-        self.user_message = user_message
-
-
-def _to_clap_error(exc: Exception) -> ClapAIError:
-    """Map SDK exceptions (most specific first) to user-facing messages."""
-    if isinstance(exc, anthropic.AuthenticationError):
-        return ClapAIError("CLAP cannot reach the AI service. The Anthropic API key was rejected.")
-    if isinstance(exc, anthropic.PermissionDeniedError):
-        return ClapAIError("CLAP cannot reach the AI service. The API key is not permitted to use this model.")
-    if isinstance(exc, anthropic.NotFoundError):
-        return ClapAIError(f"CLAP cannot reach the AI service. The model {config.MODEL} was not found.")
-    if isinstance(exc, anthropic.RateLimitError):
-        return ClapAIError("The AI service is rate limiting CLAP. Try again in a moment.")
-    if isinstance(exc, anthropic.BadRequestError):
-        return ClapAIError("The AI service rejected the request.")
-    if isinstance(exc, anthropic.APIStatusError):
-        if exc.status_code >= 500:
-            return ClapAIError("The AI service is temporarily unavailable. Try again in a moment.")
-        return ClapAIError("The AI service returned an error.")
-    if isinstance(exc, anthropic.APIConnectionError):
-        return ClapAIError("CLAP cannot reach the AI service.")
-    return ClapAIError("CLAP cannot reach the AI service.")
-
-
 # ── History helpers ───────────────────────────────────────────────────────────
 
-def _has_tool_result(content) -> bool:
-    if not isinstance(content, list):
-        return False
-    return any(
-        (b.get("type") if isinstance(b, dict) else getattr(b, "type", None)) == "tool_result"
-        for b in content
-    )
+def _as_text(content) -> str:
+    """Stored content may be a string or a legacy list of {"type": "text"} blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n\n".join(
+            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+        ).strip()
+    return ""
+
+
+def normalize_history(history: list[dict]) -> list[dict]:
+    """
+    Bring stored/legacy messages into the neutral format (see ai/base.py).
+    Messages already in the neutral format pass through untouched.
+    """
+    out = []
+    for msg in history:
+        role = msg.get("role")
+        if role in ("tool",) or msg.get("tool_calls") or msg.get("raw") is not None:
+            out.append(msg)
+        elif role in ("user", "assistant"):
+            text = _as_text(msg.get("content"))
+            if text:
+                out.append({"role": role, "content": text})
+    return out
 
 
 def trim_history(history: list[dict], limit: int) -> list[dict]:
     """
-    Keep at most `limit` messages, starting on a plain user turn so no
-    tool_result is left without the tool_use that produced it.
+    Keep at most `limit` messages, starting on a user turn so a tool call is
+    never separated from its results.
     """
     trimmed = history[-limit:] if len(history) > limit else list(history)
     for i, msg in enumerate(trimmed):
-        if msg.get("role") == "user" and not _has_tool_result(msg.get("content")):
+        if msg.get("role") == "user":
             return trimmed[i:]
     return []
 
 
-def _text_of(content) -> str:
-    parts = []
-    for b in content:
-        if getattr(b, "type", None) == "text" and getattr(b, "text", ""):
-            parts.append(b.text)
-    return "\n\n".join(parts).strip()
+def _fallback_reply(tool_log: list[tuple[str, str | None]]) -> str:
+    """
+    Reply for the rare case where the model ends a turn without text: report
+    the real outcome of the tools that ran, never an invented one.
+    """
+    if not tool_log:
+        raise ClapAIError("The AI service returned an empty response. Please try again.")
+    failures = [err for _, err in tool_log if err]
+    if failures:
+        return f"That did not work: {failures[-1]}"
+    return "Done."
 
 
 # ── Main chat function ────────────────────────────────────────────────────────
 
-_client: "anthropic.Anthropic | None" = None
 MAX_TOOL_ROUNDS = 12
-
-
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=60.0, max_retries=2)
-    return _client
 
 
 def chat(
@@ -459,68 +451,54 @@ def chat(
 
     on_tool_call(name, inputs): called just before a tool runs.
     on_tool_result(name, inputs, result_dict): called after it finishes.
-    voice_mode: if True, instructs Claude to reply in short spoken sentences.
+    voice_mode: if True, asks for short spoken replies.
 
     Raises ClapAIError if the AI service cannot be reached.
     """
-    history = trim_history(list(conversation_history), config.HISTORY_LIMIT)
+    history = trim_history(normalize_history(conversation_history), config.HISTORY_LIMIT)
     history.append({"role": "user", "content": user_message})
     save_message("user", user_message)
-    client = _get_client()
+
+    provider = ai.get_provider()
+    system = _build_system(voice_mode)
+    tool_log: list[tuple[str, str | None]] = []
 
     for _round in range(MAX_TOOL_ROUNDS):
-        try:
-            response = client.messages.create(
-                model=config.MODEL,
-                max_tokens=config.MAX_TOKENS,
-                system=_build_system(voice_mode),
-                tools=TOOLS,
-                messages=history,
-            )
-        except anthropic.APIError as exc:
-            log.error("Claude request failed: %r", exc)
-            raise _to_clap_error(exc) from exc
+        turn = provider.generate(system, history, TOOLS)
 
-        if response.stop_reason == "tool_use":
-            history.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
+        if turn.tool_calls:
+            history.append({"role": "assistant", "content": turn.text, "tool_calls": turn.tool_calls, "raw": turn.raw})
+            results = []
+            for call in turn.tool_calls:
                 if on_tool_call:
-                    on_tool_call(block.name, block.input)
-                result = run_tool(block.name, block.input)
+                    on_tool_call(call.name, call.args)
+                result = run_tool(call.name, call.args)
                 failure = tool_failed(result)
                 if failure:
-                    log.info("tool %s reported failure: %s", block.name, failure)
+                    log.info("tool %s reported failure: %s", call.name, failure)
                 if on_tool_result:
-                    on_tool_result(block.name, block.input, result)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result, default=str),
-                    **({"is_error": True} if failure else {}),
-                })
-            history.append({"role": "user", "content": tool_results})
+                    on_tool_result(call.name, call.args, result)
+                tool_log.append((call.name, failure))
+                results.append({"id": call.id, "name": call.name, "content": result, "is_error": bool(failure)})
+            history.append({"role": "tool", "results": results})
             continue
 
-        text = _text_of(response.content)
-        if response.stop_reason == "refusal" and not text:
-            text = "I can't help with that."
-        elif response.stop_reason == "max_tokens":
+        text = turn.text
+        if turn.finish == "blocked":
+            text = text or "I can't help with that."
+        elif turn.finish == "malformed":
+            text = "I couldn't work out how to do that. Please try rephrasing."
+        elif turn.finish == "max_tokens":
             text = (text + " …").strip() if text else "That reply was too long to finish."
-        elif response.stop_reason not in ("end_turn", "stop_sequence"):
-            log.warning("unexpected stop_reason: %s", response.stop_reason)
+        elif not text:
+            text = _fallback_reply(tool_log)
 
-        # Only text is kept for finished turns: never leave an unanswered tool_use behind.
-        final_content = [{"type": "text", "text": text}] if text else []
-        if final_content:
-            history.append({"role": "assistant", "content": final_content})
-            save_message("assistant", final_content)
+        history.append({"role": "assistant", "content": text, "raw": turn.raw})
+        save_message("assistant", text)
         return text, trim_history(history, config.HISTORY_LIMIT)
 
     log.warning("tool loop stopped after %d rounds", MAX_TOOL_ROUNDS)
     text = "I stopped after too many steps. Please narrow the request."
-    history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
-    save_message("assistant", [{"type": "text", "text": text}])
+    history.append({"role": "assistant", "content": text})
+    save_message("assistant", text)
     return text, trim_history(history, config.HISTORY_LIMIT)
