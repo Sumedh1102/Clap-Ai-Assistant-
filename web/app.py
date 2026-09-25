@@ -1,21 +1,30 @@
 """
-Flask web interface for J.A.R.V.I.S.
+Flask web interface for CLAP.
 
-Serves the Iron Man HUD at localhost:{WEB_PORT} and exposes a REST API
-for chat, knowledge base management, and task viewing.
+  /              CLAP HUD (React + ThreeUI PredictiveArcCanvas, built into web/frontend/dist)
+  /console       text console: knowledge base import and task manifest
+  /api/events    server-sent events: live assistant state, conversation, tool activity
+  /api/state     current snapshot of the same data
+  /api/system    real system metrics
+  /api/chat      send a command (runs through the shared CLAP session)
+
+Binds to 127.0.0.1 only. No secrets are ever sent to the browser.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import queue
 import threading
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
-from agent import chat as agent_chat
 from config import config
 from database import load_recent_history
+from events import hub
 from tools.knowledge_base import (
     add_knowledge,
     delete_knowledge,
@@ -25,38 +34,155 @@ from tools.knowledge_base import (
     search_knowledge,
 )
 from tools.tasks import list_tasks
+from web.system import system_metrics
+
+log = logging.getLogger("clap.web")
+
+HUD_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
+SSE_KEEPALIVE_SECONDS = 15
 
 app = Flask(__name__, template_folder="templates")
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
 
-# Separate conversation history for the web session
-_web_history: list[dict] = []
-_web_lock = threading.Lock()
+_session = None
+_session_lock = threading.Lock()
+
+
+def get_session():
+    """The CLAP session shared with voice mode; created on demand for web-only use."""
+    global _session
+    with _session_lock:
+        if _session is None:
+            from session import ClapSession
+            _session = ClapSession(speak_replies=False, voice_mode=False)
+        return _session
+
+
+def set_session(session) -> None:
+    global _session
+    with _session_lock:
+        _session = session
+
+
+# ── Local-only guard ──────────────────────────────────────────────────────────
+
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+
+@app.before_request
+def _local_only():
+    # Reject requests addressed to other hostnames (DNS-rebinding protection):
+    # CLAP can open apps and send email, so only localhost may drive it.
+    host = request.host or ""
+    hostname = host.split("]")[0] + "]" if host.startswith("[") else host.rsplit(":", 1)[0]
+    if hostname.lower() not in _ALLOWED_HOSTS:
+        abort(403)
 
 
 # ── Pages ────────────────────────────────────────────────────────────────────
 
+_HUD_MISSING = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>CLAP</title><style>body{background:#030303;color:#d9d3ee;font:15px -apple-system,sans-serif;
+display:grid;place-items:center;height:100vh;margin:0}code{color:#b9a8ff}</style></head>
+<body><div><h1 style="letter-spacing:.4em;font-weight:500">CLAP</h1>
+<p>The HUD has not been built yet. From the project folder run:</p>
+<p><code>npm install &amp;&amp; npm run build</code></p>
+<p>Then reload this page. The text console is available at <a style="color:#b9a8ff" href="/console">/console</a>.</p>
+</div></body></html>"""
+
+
 @app.route("/")
 def index():
-    return render_template("index.html", user_name=config.USER_NAME)
+    if (HUD_DIST / "index.html").exists():
+        return send_from_directory(HUD_DIST, "index.html", max_age=0)
+    return Response(_HUD_MISSING, mimetype="text/html")
+
+
+@app.route("/assets/<path:filename>")
+def hud_assets(filename: str):
+    return send_from_directory(HUD_DIST / "assets", filename)
+
+
+@app.route("/console")
+def console_page():
+    return render_template("console.html", user_name=config.USER_NAME, model=config.MODEL)
+
+
+# ── Live state ────────────────────────────────────────────────────────────────
+
+def _static_info() -> dict:
+    return {"assistant": config.ASSISTANT_NAME, "model": config.MODEL, "user_name": config.USER_NAME}
+
+
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event, default=str)}\n\n"
+
+
+@app.route("/api/events")
+def api_events():
+    q = hub.subscribe()
+
+    def stream():
+        try:
+            yield "retry: 2000\n\n"
+            yield _sse({**hub.snapshot(), **_static_info()})
+            while True:
+                try:
+                    yield _sse(q.get(timeout=SSE_KEEPALIVE_SECONDS))
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            hub.unsubscribe(q)
+
+    return Response(
+        stream(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.route("/api/state")
+def api_state():
+    return jsonify({**hub.snapshot(), **_static_info()})
+
+
+@app.route("/api/system")
+def api_system():
+    snap = hub.snapshot()
+    return jsonify({
+        **system_metrics(),
+        "model": config.MODEL,
+        "mic": snap["mic"],
+        "voice": snap["voice"],
+        "state": snap["state"],
+        "busy": _session.busy if _session is not None else False,
+    })
+
+
+@app.route("/api/health")
+def api_health():
+    return jsonify({"ok": True, "assistant": config.ASSISTANT_NAME})
 
 
 # ── Chat ─────────────────────────────────────────────────────────────────────
 
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
-    global _web_history
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
     if not message:
         return jsonify({"error": "No message provided"}), 400
 
-    with _web_lock:
-        try:
-            reply, _web_history = agent_chat(message, _web_history)
-            return jsonify({"reply": reply})
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 500
+    result = get_session().handle(message, source="web", wait=True)
+    if result.ok:
+        return jsonify({
+            "reply": result.reply,
+            "message_id": result.message_id,
+            "spoken": result.spoken,
+            "voice_error": result.error or None,
+        })
+    status = 409 if "still working" in result.error else 503
+    return jsonify({"error": result.error, "message_id": result.message_id}), status
 
 
 @app.route("/api/chat/history", methods=["GET"])
@@ -152,21 +278,25 @@ def api_tasks():
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-def run_web(port: int | None = None, open_browser: bool = True) -> None:
-    """Start the Flask server in a background daemon thread."""
-    port = port or config.WEB_PORT
+def run_web(port: int | None = None, open_browser: bool = True, session=None):
+    """
+    Start the web server in a background daemon thread and return it.
+    Raises OSError immediately if the port is unavailable.
+    """
+    from werkzeug.serving import make_server
 
-    def _serve() -> None:
-        import logging
-        log = logging.getLogger("werkzeug")
-        log.setLevel(logging.ERROR)  # suppress request logs
-        app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
-
-    t = threading.Thread(target=_serve, name="jarvis-web", daemon=True)
-    t.start()
+    if session is not None:
+        set_session(session)
+    port = config.WEB_PORT if port is None else port
+    try:
+        server = make_server("127.0.0.1", port, app, threaded=True)
+    except SystemExit:
+        # werkzeug exits the process when the port is taken; callers expect an error instead
+        raise OSError(f"port {port} is already in use") from None
+    threading.Thread(target=server.serve_forever, name="clap-web", daemon=True).start()
+    log.info("HUD serving on http://127.0.0.1:%d", port)
 
     if open_browser:
-        import time
         import webbrowser
-        time.sleep(0.8)  # brief pause for Flask to bind
         webbrowser.open(f"http://127.0.0.1:{port}")
+    return server

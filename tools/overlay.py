@@ -1,11 +1,14 @@
 """
-Floating JARVIS status overlay for macOS.
+Floating CLAP status overlay for macOS.
 
-Always visible in the top-right corner. Changes appearance to reflect state:
-  STANDBY   → dim border, quiet dot
-  LISTENING → bright cyan, pulsing ring
-  THINKING  → amber, spinning dots
-  SPEAKING  → cyan-green, animated bars
+Always visible in the top-right corner. Mirrors the assistant state from the
+event hub (the same source the web HUD uses):
+  STANDBY   → dim violet border, quiet dot
+  LISTENING → bright violet, pulsing ring
+  THINKING  → pale violet, spinning dots
+  EXECUTING → amber, spinning dots
+  SPEAKING  → lilac, animated bars
+  ERROR     → red
 
 Runs on the main thread via tkinter mainloop().
 All state changes from other threads go through a thread-safe queue.
@@ -24,21 +27,27 @@ class State(Enum):
     STANDBY   = "standby"
     LISTENING = "listening"
     THINKING  = "thinking"
+    EXECUTING = "executing"
     SPEAKING  = "speaking"
+    ERROR     = "error"
 
 
-# Palette
+# Palette (violet, matching the Predictive Arc)
 _COLORS = {
-    State.STANDBY:   {"border": "#0f3460", "accent": "#1e3a5f", "text": "#2a5080", "label": "STANDBY"},
-    State.LISTENING: {"border": "#00d4ff", "accent": "#00d4ff", "text": "#00d4ff", "label": "LISTENING"},
-    State.THINKING:  {"border": "#ffaa00", "accent": "#ffaa00", "text": "#ffaa00", "label": "PROCESSING"},
-    State.SPEAKING:  {"border": "#64ffda", "accent": "#64ffda", "text": "#64ffda", "label": "SPEAKING"},
+    State.STANDBY:   {"border": "#2a2140", "accent": "#3b2f5c", "text": "#6e62a0", "label": "ONLINE"},
+    State.LISTENING: {"border": "#9d7bff", "accent": "#9d7bff", "text": "#c4b2ff", "label": "LISTENING"},
+    State.THINKING:  {"border": "#b9a8ff", "accent": "#d9ceff", "text": "#d9ceff", "label": "PROCESSING"},
+    State.EXECUTING: {"border": "#ffb86b", "accent": "#ffb86b", "text": "#ffcf99", "label": "EXECUTING"},
+    State.SPEAKING:  {"border": "#d7a8ff", "accent": "#e6c6ff", "text": "#f0dcff", "label": "RESPONDING"},
+    State.ERROR:     {"border": "#ff5c6c", "accent": "#ff5c6c", "text": "#ff8a95", "label": "SYSTEM ERROR"},
 }
+
+_BG = "#050409"
 
 W, H = 240, 64
 
 
-class JarvisOverlay:
+class ClapOverlay:
     def __init__(self) -> None:
         self._state   = State.STANDBY
         self._queue:  queue.Queue[State] = queue.Queue()
@@ -50,6 +59,14 @@ class JarvisOverlay:
 
     def set_state(self, state: State) -> None:
         self._queue.put(state)
+
+    def on_event(self, event: dict) -> None:
+        """Event-hub listener: mirror assistant state changes."""
+        if event.get("type") == "state":
+            try:
+                self.set_state(State(event["state"]))
+            except ValueError:
+                pass
 
     def stop(self) -> None:
         if self._root:
@@ -64,7 +81,7 @@ class JarvisOverlay:
         root.overrideredirect(True)           # no title bar / chrome
         root.attributes("-topmost", True)     # float above all windows
         root.attributes("-alpha", 0.93)
-        root.configure(bg="#020c1b")
+        root.configure(bg=_BG)
 
         # Position: top-right, 20 px from screen edge
         sw = root.winfo_screenwidth()
@@ -72,7 +89,7 @@ class JarvisOverlay:
 
         self._canvas = tk.Canvas(
             root, width=W, height=H,
-            bg="#020c1b", highlightthickness=0,
+            bg=_BG, highlightthickness=0,
         )
         self._canvas.pack()
 
@@ -119,7 +136,7 @@ class JarvisOverlay:
 
         col = _COLORS[self._state]
         t   = self._tick
-        bg  = "#020c1b"
+        bg  = _BG
 
         # ── Background ────────────────────────────────────────────────
         c.create_rectangle(0, 0, W, H, fill=bg, outline="")
@@ -146,7 +163,7 @@ class JarvisOverlay:
         # ── Logo ───────────────────────────────────────────────────────
         c.create_text(
             14, H // 2 - 6,
-            text="J.A.R.V.I.S.",
+            text="CLAP",
             anchor="w",
             font=("Courier New", 11, "bold"),
             fill=col["text"],
@@ -170,7 +187,7 @@ class JarvisOverlay:
         if self._state == State.STANDBY:
             # Dim small circle
             c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
-                          fill="#0f3460", outline="#1e3a5f")
+                          fill=col["border"], outline=col["accent"])
 
         elif self._state == State.LISTENING:
             # Pulsing concentric rings
@@ -184,7 +201,7 @@ class JarvisOverlay:
             c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
                           fill=col["accent"], outline="")
 
-        elif self._state == State.THINKING:
+        elif self._state in (State.THINKING, State.EXECUTING):
             # Three spinning dots
             for i in range(3):
                 angle = math.radians(t * 6 + i * 120)
@@ -207,10 +224,15 @@ class JarvisOverlay:
                     fill=col["accent"], outline="",
                 )
 
+        elif self._state == State.ERROR:
+            c.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, outline=col["accent"], width=1.5)
+            c.create_line(cx, cy - 3, cx, cy + 1, fill=col["accent"], width=1.5)
+            c.create_oval(cx - 1, cy + 3, cx + 1, cy + 5, fill=col["accent"], outline="")
+
     @staticmethod
     def _alpha_fill(hex_color: str, alpha: float) -> str:
-        """Blend hex_color toward #020c1b background by alpha."""
+        """Blend hex_color toward the background by alpha."""
         fg = tuple(int(hex_color[i:i+2], 16) for i in (1, 3, 5))
-        bg = (2, 12, 27)
+        bg = tuple(int(_BG[i:i+2], 16) for i in (1, 3, 5))
         blended = tuple(int(bg[j] + (fg[j] - bg[j]) * alpha) for j in range(3))
         return "#{:02x}{:02x}{:02x}".format(*blended)

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Install or remove Jarvis as a macOS login agent.
+Install or remove CLAP as a macOS login agent.
+
+Only install this once CLAP runs correctly from Terminal
+(`python clap.py --voice` / `python clap.py --web`).
 
 Usage:
-  python autostart.py install          # start on login in voice mode
-  python autostart.py install --web    # start on login with web HUD
+  python autostart.py install          # start on login in voice mode (+ HUD server)
+  python autostart.py install --web    # start on login with the web HUD only
   python autostart.py uninstall        # remove autostart
   python autostart.py status           # check if running
 """
@@ -15,12 +18,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-LABEL = "com.jarvis.assistant"
+LABEL = "com.clap.assistant"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+# Agent installed by the pre-CLAP (JARVIS) version of this project
+LEGACY_LABEL = "com.jarvis.assistant"
+LEGACY_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LEGACY_LABEL}.plist"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 PYTHON = PROJECT_DIR / ".venv" / "bin" / "python"
-JARVIS = PROJECT_DIR / "jarvis.py"
+ENTRY = PROJECT_DIR / "clap.py"
 LOG_DIR = PROJECT_DIR / "logs"
 
 
@@ -37,8 +44,9 @@ def _plist(mode_flag: str) -> str:
     <key>ProgramArguments</key>
     <array>
         <string>{PYTHON}</string>
-        <string>{JARVIS}</string>
+        <string>{ENTRY}</string>
         <string>{mode_flag}</string>
+        <string>--no-browser</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -57,16 +65,16 @@ def _plist(mode_flag: str) -> str:
     <integer>5</integer>
 
     <key>StandardOutPath</key>
-    <string>{LOG_DIR}/jarvis.log</string>
+    <string>{LOG_DIR}/clap.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>{LOG_DIR}/jarvis_error.log</string>
+    <string>{LOG_DIR}/clap.err.log</string>
 
-    <!-- Inherit the user's PATH so apps can be found -->
+    <!-- PATH for launchd (Apple Silicon Homebrew first) so tools can be found -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>{Path.home()}</string>
     </dict>
@@ -75,12 +83,21 @@ def _plist(mode_flag: str) -> str:
 """
 
 
+def _remove_legacy_agent() -> None:
+    """Unload the old JARVIS LaunchAgent so two assistants never run at once."""
+    if LEGACY_PLIST_PATH.exists():
+        subprocess.run(["launchctl", "unload", str(LEGACY_PLIST_PATH)], capture_output=True)
+        LEGACY_PLIST_PATH.unlink()
+        print(f"Removed legacy agent: {LEGACY_PLIST_PATH}")
+
+
 def install(mode_flag: str = "--voice") -> None:
     if not PYTHON.exists():
         print(f"Error: virtualenv not found at {PYTHON}")
         print("Run: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt")
         sys.exit(1)
 
+    _remove_legacy_agent()
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     PLIST_PATH.write_text(_plist(mode_flag))
     print(f"Wrote: {PLIST_PATH}")
@@ -94,22 +111,23 @@ def install(mode_flag: str = "--voice") -> None:
     if result.returncode != 0:
         print(f"Warning: launchctl load returned {result.returncode}: {result.stderr.strip()}")
     else:
-        mode_label = "Web HUD (localhost:7777)" if mode_flag == "--web" else "Voice mode"
-        print(f"\n✓ Jarvis will now start automatically on login.")
+        mode_label = "Web HUD (localhost:7777)" if mode_flag == "--web" else "Voice mode + HUD (localhost:7777)"
+        print(f"\n✓ CLAP will now start automatically on login.")
         print(f"  Mode    : {mode_label}")
-        print(f"  Logs    : {LOG_DIR}/jarvis.log")
+        print(f"  Logs    : {LOG_DIR}/clap.log (+ clap.out.log / clap.err.log)")
         print(f"\nTo stop it now:   python autostart.py stop")
         print(f"To remove:        python autostart.py uninstall")
 
 
 def uninstall() -> None:
+    _remove_legacy_agent()
     if not PLIST_PATH.exists():
-        print("Jarvis autostart is not installed.")
+        print("CLAP autostart is not installed.")
         return
     subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True)
     PLIST_PATH.unlink()
     print(f"✓ Removed {PLIST_PATH}")
-    print("Jarvis will no longer start on login.")
+    print("CLAP will no longer start on login.")
 
 
 def status() -> None:
@@ -118,13 +136,15 @@ def status() -> None:
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        print(f"✓ Jarvis agent is loaded:\n{result.stdout}")
+        print(f"✓ CLAP agent is loaded:\n{result.stdout}")
     else:
-        print("Jarvis agent is NOT loaded (not installed or stopped).")
+        print("CLAP agent is NOT loaded (not installed or stopped).")
+    if LEGACY_PLIST_PATH.exists():
+        print(f"  Legacy JARVIS agent still present: {LEGACY_PLIST_PATH} (run: python autostart.py uninstall)")
 
     if PLIST_PATH.exists():
         print(f"  Plist: {PLIST_PATH}")
-    log = LOG_DIR / "jarvis.log"
+    log = LOG_DIR / "clap.log"
     if log.exists():
         print(f"\n── Last 10 log lines ──────────────────────────────────")
         lines = log.read_text().splitlines()
@@ -138,7 +158,7 @@ def stop() -> None:
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        print("✓ Jarvis stopped. It will restart automatically next login.")
+        print("✓ CLAP stopped. It will restart automatically next login.")
         print("  To prevent restart: python autostart.py uninstall")
     else:
         print(f"Could not stop: {result.stderr.strip()}")
@@ -149,11 +169,11 @@ def start() -> None:
         print("Not installed. Run: python autostart.py install")
         return
     subprocess.run(["launchctl", "start", LABEL])
-    print("✓ Jarvis started.")
+    print("✓ CLAP started.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Jarvis autostart manager")
+    parser = argparse.ArgumentParser(description="CLAP autostart manager")
     sub = parser.add_subparsers(dest="cmd")
 
     p_install = sub.add_parser("install", help="Install autostart")

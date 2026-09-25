@@ -16,6 +16,8 @@ try:
 except ImportError:
     print("ERROR: faster-whisper not installed"); sys.exit(1)
 
+from tools.voice_input import wake_word_in
+
 SAMPLE_RATE = 16_000
 DURATION    = 3.0
 
@@ -33,7 +35,7 @@ model = WhisperModel("base.en", device="cpu", compute_type="int8")
 print("Whisper ready.")
 
 print("\n── 5 recording tests ──────────────────────────────────────────")
-print("Say 'Jarvis' clearly each time when prompted.\n")
+print("Say 'CLAP' (or 'Hey CLAP') clearly each time when prompted.\n")
 
 for i in range(5):
     input(f"  Test {i+1}/5 — press Enter then speak...")
@@ -48,12 +50,11 @@ for i in range(5):
     segments, _ = model.transcribe(chunk, beam_size=5, language="en", vad_filter=False)
     text = " ".join(s.text.strip() for s in segments).strip()
 
-    wake_words = {"jarvis", "travis", "j.a.r.v.i.s"}
-    detected = any(w in text.lower() for w in wake_words)
+    detected = wake_word_in(text)
 
     print(f"    RMS={rms:.4f}  Peak={peak:.4f}  Transcript='{text}'  Wake={'✓ YES' if detected else '✗ NO'}")
 
 print("\n── Threshold diagnosis ────────────────────────────────────────")
-print("Current ENERGY_THRESHOLD in voice_input.py: 0.008")
-print("If your RMS values above are < 0.008, the mic is too quiet — lower the threshold.")
-print("If Whisper didn't transcribe 'Jarvis', it may need vad_filter=False.\n")
+print("ENERGY_MIN in tools/voice_input.py: 0.005 (wake scan skips quieter audio)")
+print("If your RMS values above are < 0.005, the mic is too quiet — lower ENERGY_MIN.")
+print("If Whisper never transcribes 'CLAP', try 'Hey CLAP' and check System Settings → Privacy → Microphone.\n")

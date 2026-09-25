@@ -31,7 +31,10 @@ def open_application(app_name: str) -> dict:
 
         if result.returncode == 0:
             return {"success": True, "message": f"Opened {app_name}"}
-        return {"success": False, "error": result.stderr.strip() or f"Could not open {app_name}"}
+        return {
+            "success": False,
+            "error": f"{app_name} could not be opened: {result.stderr.strip() or 'application not found'}",
+        }
     except FileNotFoundError:
         return {"success": False, "error": f"Application not found: {app_name}"}
     except Exception as exc:
@@ -41,14 +44,26 @@ def open_application(app_name: str) -> dict:
 def close_application(app_name: str) -> dict:
     try:
         if _SYSTEM == "Darwin":
-            # Try AppleScript quit first (graceful)
-            script = f'tell application "{app_name}" to quit'
+            # Graceful AppleScript quit. The name is passed as an argument, never
+            # interpolated into the script, so it cannot inject AppleScript.
             result = subprocess.run(
-                ["osascript", "-e", script], capture_output=True, text=True
+                ["osascript",
+                 "-e", "on run argv",
+                 "-e", "set appName to item 1 of argv",
+                 "-e", "if application appName is not running then return \"not running\"",
+                 "-e", "tell application appName to quit",
+                 "-e", "return \"closed\"",
+                 "-e", "end run",
+                 app_name],
+                capture_output=True, text=True,
             )
+            if result.returncode == 0 and result.stdout.strip() == "not running":
+                return {"success": False, "error": f"{app_name} is not running"}
             if result.returncode != 0:
-                # Fallback to pkill
-                subprocess.run(["pkill", "-f", app_name], capture_output=True)
+                # Fallback: exact process-name match only (never -f, which can hit unrelated processes)
+                kill = subprocess.run(["pkill", "-x", app_name], capture_output=True, text=True)
+                if kill.returncode != 0:
+                    return {"success": False, "error": f"{app_name} is not running or could not be closed"}
         elif _SYSTEM == "Windows":
             exe = app_name if app_name.lower().endswith(".exe") else app_name + ".exe"
             result = subprocess.run(
@@ -57,7 +72,9 @@ def close_application(app_name: str) -> dict:
             if result.returncode != 0:
                 return {"success": False, "error": result.stderr.strip()}
         else:
-            subprocess.run(["pkill", "-f", app_name], capture_output=True)
+            kill = subprocess.run(["pkill", "-x", app_name], capture_output=True)
+            if kill.returncode != 0:
+                return {"success": False, "error": f"{app_name} is not running or could not be closed"}
 
         return {"success": True, "message": f"Closed {app_name}"}
     except Exception as exc:

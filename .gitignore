@@ -1,5 +1,12 @@
+# Secrets
 .env
+
+# Local data (memory, tasks, history) — never commit
 *.db
+*.db-wal
+*.db-shm
+
+# Python
 __pycache__/
 *.py[cod]
 .venv/
@@ -7,4 +14,13 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# Frontend
+node_modules/
+web/frontend/dist/
+
+# Runtime
+logs/
+.cache/
+
 .DS_Store

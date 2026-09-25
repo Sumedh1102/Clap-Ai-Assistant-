@@ -2,7 +2,7 @@
 Knowledge base — SQLite FTS5 full-text search.
 
 Stores notes, documents, and imported Claude conversations that
-JARVIS can search during conversations for additional context.
+CLAP can search during conversations for additional context.
 """
 
 from __future__ import annotations

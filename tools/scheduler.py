@@ -51,7 +51,7 @@ def start_scheduler(on_event: Callable[[str], None]) -> None:
             schedule.run_pending()
             time.sleep(20)
 
-    _thread = threading.Thread(target=_run, name="jarvis-scheduler", daemon=True)
+    _thread = threading.Thread(target=_run, name="clap-scheduler", daemon=True)
     _thread.start()
 
 

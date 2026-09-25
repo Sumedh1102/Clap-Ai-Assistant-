@@ -3,19 +3,23 @@ Voice input — single persistent microphone stream.
 
 ONE sounddevice.InputStream stays open for the entire session:
   - No open/close cycling → no blinking mic indicator
-  - LISTENING state: overlapping 2.5 s windows scanned for "Jarvis"
+  - LISTENING state: overlapping 2.5 s windows scanned for the wake word "CLAP"
   - RECORDING state: captures command audio until silence detected
+  - While CLAP itself is speaking, microphone frames are ignored so CLAP
+    never wakes itself or transcribes its own voice.
 
 Public API:
   wake_word_available() → bool
+  wake_word_in(text)    → bool
   transcribe(audio)     → str          (used by push-to-talk fallback)
-  run_voice_loop(on_command, on_wake, stop_event)
+  run_voice_loop(on_command, on_wake, stop_event, ...)
 """
 
 from __future__ import annotations
 
 import collections
 import queue
+import re
 import threading
 from typing import Callable
 
@@ -37,7 +41,11 @@ _whisper: "WhisperModel | None" = None
 SR = 16_000
 BLOCKSIZE = 512   # ~32 ms per callback frame
 
-_WAKE_WORDS = {"jarvis", "travis", "jadwis", "jarves", "jarvis.", "j.a.r.v.i.s"}
+# Wake word "CLAP" — also matches "hey clap", "Hey, CLAP.", "C.L.A.P." and
+# common Whisper spellings. Whole words only: "clapping"/"claps" do not match.
+_WAKE_RE = re.compile(r"\b(?:clap|clapp|klap|c l a p)\b")
+# Whisper annotates non-speech sounds as "(clapping)", "[APPLAUSE]", "*claps*".
+_ANNOTATION_RE = re.compile(r"\([^)]*\)|\[[^\]]*\]|\*[^*]*\*|♪[^♪]*♪")
 
 
 def _get_whisper() -> "WhisperModel":
@@ -47,9 +55,14 @@ def _get_whisper() -> "WhisperModel":
     return _whisper
 
 
-def _wake_in(text: str) -> bool:
-    t = text.lower()
-    return any(w in t for w in _WAKE_WORDS)
+def wake_word_in(text: str) -> bool:
+    t = _ANNOTATION_RE.sub(" ", text.lower())
+    t = re.sub(r"(?<=\b[a-z])[.\-](?=[a-z]\b)", " ", t)   # c.l.a.p / c-l-a-p → c l a p
+    t = t.replace(".", " ")
+    return bool(_WAKE_RE.search(t))
+
+
+_wake_in = wake_word_in  # backwards-compatible name
 
 
 def wake_word_available() -> bool:
@@ -70,13 +83,25 @@ def run_voice_loop(
     on_command: Callable[[str], None],
     on_wake: "Callable[[], None] | None" = None,
     stop_event: "threading.Event | None" = None,
+    on_capture_start: "Callable[[], None] | None" = None,
+    on_transcribing: "Callable[[], None] | None" = None,
+    on_no_speech: "Callable[[], None] | None" = None,
+    is_output_active: "Callable[[], bool] | None" = None,
+    on_ready: "Callable[[], None] | None" = None,
 ) -> None:
     """
     Open ONE InputStream and run a state machine:
 
-      LISTENING → scan overlapping 2.5 s windows every 0.5 s for "Jarvis"
+      LISTENING → scan overlapping 2.5 s windows every 0.5 s for "CLAP"
       RECORDING → accumulate audio until 1.5 s of silence (max 30 s)
                   then transcribe and call on_command(text)
+
+    Optional hooks report real activity to the HUD:
+      on_capture_start  first command audio frame recorded
+      on_transcribing   recording finished, Whisper running
+      on_no_speech      recording contained no speech
+      on_ready          microphone stream open, wake word armed
+    is_output_active() → True while CLAP is speaking; frames are then ignored.
 
     Blocks until stop_event is set.
     """
@@ -122,6 +147,13 @@ def run_voice_loop(
             except queue.Empty:
                 continue
 
+            if is_output_active and is_output_active():
+                # CLAP is talking: never hear ourselves (no self-wake, no echo in commands)
+                if mode == Mode.LISTENING:
+                    rolling.clear()
+                    frames_to_check = CHECK_EVERY
+                continue
+
             if mode == Mode.LISTENING:
                 rolling.extend(frame)
                 frames_to_check -= 1
@@ -139,7 +171,7 @@ def run_voice_loop(
                     )
                     text = " ".join(s.text.strip() for s in segs).strip()
 
-                    if _wake_in(text):
+                    if wake_word_in(text):
                         mode = Mode.RECORDING
                         rec_buf = []
                         silent_streak = 0
@@ -148,6 +180,8 @@ def run_voice_loop(
                             threading.Thread(target=on_wake, daemon=True).start()
 
             elif mode == Mode.RECORDING:
+                if not rec_buf and on_capture_start:
+                    on_capture_start()
                 rec_buf.append(frame)
                 rms = float(np.sqrt(np.mean(frame ** 2)))
 
@@ -166,6 +200,8 @@ def run_voice_loop(
                     silent_streak = 0
                     mode = Mode.LISTENING
 
+                    if on_transcribing:
+                        on_transcribing()
                     segs, _ = _get_whisper().transcribe(
                         audio, beam_size=5, language="en", vad_filter=True
                     )
@@ -174,13 +210,17 @@ def run_voice_loop(
                         threading.Thread(
                             target=on_command, args=(text,), daemon=True
                         ).start()
+                    elif on_no_speech:
+                        on_no_speech()
 
-    threading.Thread(target=_consumer, daemon=True, name="jarvis-consumer").start()
+    threading.Thread(target=_consumer, daemon=True, name="clap-voice-consumer").start()
 
     with sd.InputStream(
         samplerate=SR, channels=1, dtype="float32",
         blocksize=BLOCKSIZE, callback=_cb,
     ):
+        if on_ready:
+            on_ready()
         stop.wait()
 
 

@@ -11,7 +11,7 @@ def search_web(query: str, count: int = 5) -> dict:
     if not config.BRAVE_API_KEY:
         return {
             "success": False,
-            "error": "BRAVE_API_KEY not configured. Set it in .env",
+            "error": "Search is not configured. Set BRAVE_API_KEY in .env to enable web search.",
         }
 
     count = max(1, min(count, 10))

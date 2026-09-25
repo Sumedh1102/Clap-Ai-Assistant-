@@ -1,13 +1,17 @@
 """
-Claude-powered JARVIS agent with tool use.
+CLAP agent — Claude reasoning with tool use.
 
 Loop:
   1. Append user message → call Claude
-  2. If stop_reason == "tool_use" → dispatch tools → loop
-  3. If stop_reason == "end_turn" → return final text
+  2. If stop_reason == "tool_use" → run tools → feed results back → loop
+  3. Otherwise → return the final text
+
+Failures of the AI service surface as ClapAIError with a short, user-facing
+message; technical details go to the log, never to the user.
 """
 
 import json
+import logging
 from datetime import datetime
 
 import anthropic
@@ -27,8 +31,11 @@ from tools.browser import (
 )
 from tools.email_tool import send_email, send_email_with_attachment
 from tools.knowledge_base import add_knowledge, search_knowledge
+from tools.labels import tool_failed
 from tools.search import search_web
 from tools.tasks import add_task, delete_task, list_tasks, update_task
+
+log = logging.getLogger("clap.agent")
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -185,7 +192,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "browser_navigate",
-        "description": "Open a URL in Chrome.",
+        "description": "Open a URL in the automated browser (Chrome if installed, otherwise Chromium).",
         "input_schema": {
             "type": "object",
             "properties": {"url": {"type": "string"}},
@@ -239,7 +246,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "browser_close",
-        "description": "Close the Chrome browser window.",
+        "description": "Close the automated browser window.",
         "input_schema": {"type": "object", "properties": {}},
     },
 ]
@@ -280,41 +287,61 @@ TOOL_HANDLERS: dict = {
 }
 
 
-def dispatch_tool(name: str, inputs: dict) -> str:
+def run_tool(name: str, inputs: dict) -> dict:
+    """Execute a tool and always return a dict (failures as {"success": False, "error": ...})."""
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
-        return json.dumps({"error": f"Unknown tool: {name}"})
+        return {"success": False, "error": f"Unknown tool: {name}"}
     try:
-        return json.dumps(handler(**inputs), default=str)
+        result = handler(**(inputs or {}))
     except Exception as exc:
-        return json.dumps({"error": f"Tool '{name}' raised: {exc}"})
+        log.exception("tool %s failed", name)
+        return {"success": False, "error": f"Tool '{name}' failed: {exc}"}
+    return result if isinstance(result, dict) else {"success": True, "result": result}
+
+
+def dispatch_tool(name: str, inputs: dict) -> str:
+    return json.dumps(run_tool(name, inputs), default=str)
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
 _SYSTEM_BASE = """\
-You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), a highly advanced personal AI \
-assistant. You are precise, proactive, and occasionally dry — always composed, never flustered.
+You are CLAP, a personal AI assistant running on the user's Mac. CLAP is an original \
+assistant, not a character from any film or franchise. Your name is pronounced "clap".
 
-ADDRESS & TONE
-- Address the user as "{user_name}" (e.g. "Right away, sir." / "Understood, sir.").
-- Formal British tone. Dry wit is acceptable; sarcasm is not.
-- Lead with the answer. Never pad with "Certainly!" or "Of course!".
-- When delivering bad news or errors, be direct and offer a solution immediately.
+VOICE & TONE
+- Intelligent, calm, concise and natural, with a quietly futuristic precision.
+- Lead with the answer or the action. No filler ("Certainly!", "I'd be delighted to...").
+- Confirm actions in a few words: "Opening Spotify." / "Task added." / "Done."
+- When something fails, say so plainly and, where useful, what would fix it.{address}
+
+ACTIONS & HONESTY
+- Use tools for anything that touches the computer, the web, tasks, email or memory. \
+Never pretend an action happened.
+- Only report an action as done after its tool result confirms success. If a tool result \
+has "success": false or an "error", say it did not work (e.g. "Spotify could not be \
+opened.") and give the reason in plain words.
+- If an integration is not configured, say so briefly (e.g. "Search is not configured.").
+- Confirm before consequential or irreversible actions unless the user explicitly asked \
+for exactly that action with all details: sending email, deleting tasks or notes, \
+submitting web forms, purchases, closing apps that may hold unsaved work. Opening apps, \
+searching and reading need no confirmation.
+- If a required detail is missing (recipient, date), ask one short question instead of guessing.
 
 CAPABILITIES
 - Task management: full CRUD via the local database.
 - Email: draft and send via Gmail, with or without attachments.
 - Web search: live results via Brave Search.
-- Browser: navigate, click, fill forms, screenshot via Chrome.
-- App control: open and close desktop applications.
+- Browser: navigate, click, fill forms, screenshot via an automated browser.
+- App control: open and close macOS applications.
 - Knowledge base: personal notes and imported documents you can search and save.
 - Daily briefing: structured morning summary of tasks and priorities.
 
 KNOWLEDGE BASE
 - Before answering factual or personal questions, call search_knowledge to check if \
 relevant context is stored.
-- If the user shares information worth retaining ("remember that…", "note that…"), \
+- If the user shares information worth retaining ("remember that...", "note that..."), \
 call add_knowledge proactively.
 
 DAILY PLANNING
@@ -325,26 +352,99 @@ When asked about the day or schedule:
 4. Offer to set task due dates or reminders if missing.
 
 TOOL USE
-- Always use tools rather than guessing. If unsure of a detail (e.g. email recipient), \
-ask before acting.
-- Chain tools logically: search before writing, list before updating.
-- Report tool failures clearly and suggest fixes."""
+- Always use tools rather than guessing.
+- Chain tools logically: search before writing, list before updating."""
+
+_VOICE_MODE = """
+
+VOICE MODE ACTIVE
+Replies are spoken aloud. Keep them to one to three short sentences. No markdown, lists, \
+emoji or URLs. Write for the ear; spell out numbers and abbreviations where it helps."""
 
 
 def _build_system(voice_mode: bool = False) -> str:
-    prompt = _SYSTEM_BASE.replace("{user_name}", config.USER_NAME)
+    address = ""
+    if config.USER_NAME:
+        address = f'\n- The user\'s name is {config.USER_NAME}. Use it sparingly.'
+    prompt = _SYSTEM_BASE.replace("{address}", address)
     if voice_mode:
-        prompt += (
-            "\n\nVOICE MODE ACTIVE\n"
-            "Keep all replies to 1-3 spoken sentences. No bullet points, no markdown. "
-            "Write as you would speak aloud. Spell out numbers and abbreviations."
-        )
+        prompt += _VOICE_MODE
     return prompt
+
+
+# ── Errors ────────────────────────────────────────────────────────────────────
+
+class ClapAIError(RuntimeError):
+    """The AI service could not produce a reply. `user_message` is safe to show/speak."""
+
+    def __init__(self, user_message: str) -> None:
+        super().__init__(user_message)
+        self.user_message = user_message
+
+
+def _to_clap_error(exc: Exception) -> ClapAIError:
+    """Map SDK exceptions (most specific first) to user-facing messages."""
+    if isinstance(exc, anthropic.AuthenticationError):
+        return ClapAIError("CLAP cannot reach the AI service. The Anthropic API key was rejected.")
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return ClapAIError("CLAP cannot reach the AI service. The API key is not permitted to use this model.")
+    if isinstance(exc, anthropic.NotFoundError):
+        return ClapAIError(f"CLAP cannot reach the AI service. The model {config.MODEL} was not found.")
+    if isinstance(exc, anthropic.RateLimitError):
+        return ClapAIError("The AI service is rate limiting CLAP. Try again in a moment.")
+    if isinstance(exc, anthropic.BadRequestError):
+        return ClapAIError("The AI service rejected the request.")
+    if isinstance(exc, anthropic.APIStatusError):
+        if exc.status_code >= 500:
+            return ClapAIError("The AI service is temporarily unavailable. Try again in a moment.")
+        return ClapAIError("The AI service returned an error.")
+    if isinstance(exc, anthropic.APIConnectionError):
+        return ClapAIError("CLAP cannot reach the AI service.")
+    return ClapAIError("CLAP cannot reach the AI service.")
+
+
+# ── History helpers ───────────────────────────────────────────────────────────
+
+def _has_tool_result(content) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(
+        (b.get("type") if isinstance(b, dict) else getattr(b, "type", None)) == "tool_result"
+        for b in content
+    )
+
+
+def trim_history(history: list[dict], limit: int) -> list[dict]:
+    """
+    Keep at most `limit` messages, starting on a plain user turn so no
+    tool_result is left without the tool_use that produced it.
+    """
+    trimmed = history[-limit:] if len(history) > limit else list(history)
+    for i, msg in enumerate(trimmed):
+        if msg.get("role") == "user" and not _has_tool_result(msg.get("content")):
+            return trimmed[i:]
+    return []
+
+
+def _text_of(content) -> str:
+    parts = []
+    for b in content:
+        if getattr(b, "type", None) == "text" and getattr(b, "text", ""):
+            parts.append(b.text)
+    return "\n\n".join(parts).strip()
 
 
 # ── Main chat function ────────────────────────────────────────────────────────
 
-_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+_client: "anthropic.Anthropic | None" = None
+MAX_TOOL_ROUNDS = 12
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=60.0, max_retries=2)
+    return _client
 
 
 def chat(
@@ -352,50 +452,75 @@ def chat(
     conversation_history: list[dict],
     on_tool_call=None,
     voice_mode: bool = False,
+    on_tool_result=None,
 ) -> tuple[str, list[dict]]:
     """
     Send a user message, run the tool-use loop, return (reply, updated_history).
-    on_tool_call: optional callback(tool_name, tool_inputs) for UI feedback.
+
+    on_tool_call(name, inputs): called just before a tool runs.
+    on_tool_result(name, inputs, result_dict): called after it finishes.
     voice_mode: if True, instructs Claude to reply in short spoken sentences.
+
+    Raises ClapAIError if the AI service cannot be reached.
     """
-    history = list(conversation_history)
+    history = trim_history(list(conversation_history), config.HISTORY_LIMIT)
     history.append({"role": "user", "content": user_message})
     save_message("user", user_message)
+    client = _get_client()
 
-    while True:
-        response = _client.messages.create(
-            model=config.MODEL,
-            max_tokens=config.MAX_TOKENS,
-            system=_build_system(voice_mode),
-            tools=TOOLS,
-            messages=history,
-        )
-
-        history.append({"role": "assistant", "content": response.content})
-
-        if response.stop_reason == "end_turn":
-            text = next(
-                (b.text for b in response.content if hasattr(b, "text")), ""
+    for _round in range(MAX_TOOL_ROUNDS):
+        try:
+            response = client.messages.create(
+                model=config.MODEL,
+                max_tokens=config.MAX_TOKENS,
+                system=_build_system(voice_mode),
+                tools=TOOLS,
+                messages=history,
             )
-            save_message("assistant", response.content)
-            if len(history) > config.HISTORY_LIMIT:
-                history = history[-config.HISTORY_LIMIT :]
-            return text, history
+        except anthropic.APIError as exc:
+            log.error("Claude request failed: %r", exc)
+            raise _to_clap_error(exc) from exc
 
         if response.stop_reason == "tool_use":
+            history.append({"role": "assistant", "content": response.content})
             tool_results = []
             for block in response.content:
                 if block.type != "tool_use":
                     continue
                 if on_tool_call:
                     on_tool_call(block.name, block.input)
-                result_json = dispatch_tool(block.name, block.input)
+                result = run_tool(block.name, block.input)
+                failure = tool_failed(result)
+                if failure:
+                    log.info("tool %s reported failure: %s", block.name, failure)
+                if on_tool_result:
+                    on_tool_result(block.name, block.input, result)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": result_json,
+                    "content": json.dumps(result, default=str),
+                    **({"is_error": True} if failure else {}),
                 })
             history.append({"role": "user", "content": tool_results})
             continue
 
-        return f"[Unexpected stop_reason: {response.stop_reason}]", history
+        text = _text_of(response.content)
+        if response.stop_reason == "refusal" and not text:
+            text = "I can't help with that."
+        elif response.stop_reason == "max_tokens":
+            text = (text + " …").strip() if text else "That reply was too long to finish."
+        elif response.stop_reason not in ("end_turn", "stop_sequence"):
+            log.warning("unexpected stop_reason: %s", response.stop_reason)
+
+        # Only text is kept for finished turns: never leave an unanswered tool_use behind.
+        final_content = [{"type": "text", "text": text}] if text else []
+        if final_content:
+            history.append({"role": "assistant", "content": final_content})
+            save_message("assistant", final_content)
+        return text, trim_history(history, config.HISTORY_LIMIT)
+
+    log.warning("tool loop stopped after %d rounds", MAX_TOOL_ROUNDS)
+    text = "I stopped after too many steps. Please narrow the request."
+    history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+    save_message("assistant", [{"type": "text", "text": text}])
+    return text, trim_history(history, config.HISTORY_LIMIT)
