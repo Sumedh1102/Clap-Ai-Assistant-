@@ -1,0 +1,118 @@
+/* CLAP core: the Predictive Arc fills the viewport; typography sits in the
+   dark field above the arc and inside its curve, never over the bright core. */
+
+.clap-core {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #030303; /* same as the renderer's dark clear colour */
+}
+
+/* Host for PredictiveArcCanvas. The component's own .threeui-background
+   (from @designcodeio/threeui/style.css) fills this frame and sizes the canvas
+   through its ResizeObserver at the correct device-pixel ratio. */
+.shader-frame {
+  position: absolute;
+  inset: 0;
+}
+
+.clap-core__brand {
+  position: absolute;
+  top: clamp(22px, 6.5vh, 70px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  text-align: center;
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(17px, 1.7vw, 26px);
+  letter-spacing: 0.72em;
+  padding-left: 0.72em; /* optically centre tracked capitals */
+  color: var(--text-strong);
+  pointer-events: none;
+  user-select: none;
+}
+
+.clap-core__status {
+  position: absolute;
+  left: 50%;
+  top: clamp(52%, 50% + 12vh, 62%);
+  transform: translateX(-50%);
+  width: min(560px, 86vw);
+  text-align: center;
+  pointer-events: none;
+  z-index: 2;
+  text-shadow: 0 0 14px #030303, 0 0 3px #030303;
+}
+
+@media (max-width: 860px) {
+  .clap-core__status { top: 60vh; }
+}
+
+.clap-core__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.32em;
+  color: var(--text-dim);
+}
+
+.clap-core__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--state-color);
+  box-shadow: 0 0 8px var(--state-color);
+}
+
+.clap-core__message {
+  margin-top: 14px;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(15px, 1.35vw, 20px);
+  letter-spacing: 0.34em;
+  padding-left: 0.34em;
+  color: var(--text-strong);
+}
+
+.clap-core__detail {
+  margin-top: 10px;
+  min-height: 1.4em;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* State colour + a restrained breathing cue while CLAP is busy */
+.clap-core { --state-color: var(--violet); }
+.clap-core--listening { --state-color: #c9b8ff; }
+.clap-core--thinking  { --state-color: #e4dcff; }
+.clap-core--executing { --state-color: var(--amber); }
+.clap-core--speaking  { --state-color: #e6c6ff; }
+.clap-core--error     { --state-color: var(--red); }
+.clap-core--offline   { --state-color: #6d6680; }
+
+.clap-core--error .clap-core__message { color: var(--red-soft); }
+.clap-core--error .clap-core__detail  { color: var(--red-soft); white-space: normal; }
+
+.clap-core--listening .clap-core__message,
+.clap-core--thinking .clap-core__message,
+.clap-core--executing .clap-core__message,
+.clap-core--speaking .clap-core__message,
+.clap-core--offline .clap-core__message {
+  animation: clap-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes clap-breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clap-core__message { animation: none !important; }
+}

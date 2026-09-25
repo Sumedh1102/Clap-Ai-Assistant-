@@ -1,0 +1,29 @@
+{
+  "name": "clap-hud",
+  "private": true,
+  "version": "1.0.0",
+  "description": "CLAP HUD — web interface built around the ThreeUI PredictiveArcCanvas",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@designcodeio/threeui": "1.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "three": "0.149.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  }
+}

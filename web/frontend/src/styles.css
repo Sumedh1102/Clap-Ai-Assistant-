@@ -1,0 +1,268 @@
+:root {
+  --bg: #030303;
+  --text-strong: #efeaff;
+  --text: #cfc8e6;
+  --text-dim: #8b84a3;
+  --text-faint: #5d5772;
+  --line: rgba(185, 168, 255, 0.14);
+  --violet: #b9a8ff;
+  --amber: #ffb86b;
+  --red: #ff5c6c;
+  --red-soft: #ff97a1;
+  --green: #9fe3c1;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-text: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --edge: clamp(16px, 2.2vw, 36px);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-text);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.hud { position: fixed; inset: 0; }
+
+/* Edge-free side vignette: keeps panel text legible without boxes cutting
+   into the arc. It sits above the canvas and never alters the renderer. */
+.hud-vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgba(3, 3, 3, 0.72) 0%,
+    rgba(3, 3, 3, 0.35) 16%,
+    rgba(3, 3, 3, 0) 28%,
+    rgba(3, 3, 3, 0) 72%,
+    rgba(3, 3, 3, 0.35) 84%,
+    rgba(3, 3, 3, 0.72) 100%
+  );
+}
+
+/* ── Side panels ─────────────────────────────────────────────────────────── */
+
+.hud-panel {
+  position: absolute;
+  top: clamp(96px, 16vh, 160px);
+  bottom: 96px;
+  display: flex;
+  flex-direction: column;
+  font-size: 12.5px;
+  z-index: 2;
+  text-shadow: 0 0 10px #030303, 0 0 2px #030303;
+}
+
+.hud-panel--left {
+  left: var(--edge);
+  width: clamp(250px, 23vw, 360px);
+}
+
+.hud-panel--right {
+  right: var(--edge);
+  width: clamp(230px, 19vw, 300px);
+  overflow: hidden;
+}
+
+.hud-panel__title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  color: var(--text-faint);
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.hud-panel__title--spaced { margin-top: 26px; }
+
+/* ── Conversation ────────────────────────────────────────────────────────── */
+
+.conversation {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: none;
+  mask-image: linear-gradient(to bottom, transparent 0, #000 40px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 40px);
+  padding-top: 40px;
+}
+.conversation::-webkit-scrollbar { display: none; }
+
+.conversation__empty { color: var(--text-faint); line-height: 1.6; }
+
+.conv-entry { margin-bottom: 16px; }
+
+.conv-entry__label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.26em;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.conv-entry__text {
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.conv-entry--user .conv-entry__text { color: var(--text-strong); }
+.conv-entry--assistant .conv-entry__label { color: var(--violet); }
+.conv-entry--system .conv-entry__label,
+.conv-entry--system .conv-entry__text { color: var(--red-soft); }
+
+.conv-entry--activity .conv-entry__text { color: var(--text-dim); font-size: 12px; }
+.conv-entry__status { margin-left: 6px; }
+.conv-entry--running .conv-entry__status { color: var(--amber); }
+.conv-entry--completed .conv-entry__status { color: var(--green); }
+.conv-entry--failed .conv-entry__status { color: var(--red); }
+
+/* ── System panel ────────────────────────────────────────────────────────── */
+
+.sys-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.sys-row__label { color: var(--text-faint); letter-spacing: 0.12em; white-space: nowrap; }
+.sys-row__value { color: var(--text); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-row__value--good { color: var(--green); }
+.sys-row__value--warn { color: var(--amber); }
+.sys-row__value--bad { color: var(--red); }
+
+.sys-note {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+.sys-note--bad { color: var(--red-soft); }
+
+.task__status {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.3em;
+  margin-bottom: 6px;
+}
+.task--running .task__status { color: var(--amber); }
+.task--completed .task__status { color: var(--green); }
+.task--failed .task__status { color: var(--red); }
+
+/* ── Command bar ─────────────────────────────────────────────────────────── */
+
+.command-bar {
+  position: absolute;
+  left: var(--edge);
+  right: var(--edge);
+  bottom: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 520px) minmax(0, 1fr);
+  align-items: center;
+  gap: 24px;
+  z-index: 3;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+}
+
+.command-bar__indicators { display: flex; gap: 20px; white-space: nowrap; }
+
+.indicator { display: inline-flex; align-items: center; gap: 8px; }
+.indicator i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.indicator--ok i, .indicator--mic-armed i { background: var(--violet); }
+.indicator--mic-capturing i { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.indicator--bad i, .indicator--mic-unavailable i { background: var(--red); }
+
+.command-bar__form { margin: 0; }
+
+.command-bar__input {
+  width: 100%;
+  padding: 11px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(8, 7, 12, 0.72);
+  color: var(--text-strong);
+  font-family: var(--font-text);
+  font-size: 13.5px;
+  letter-spacing: 0.01em;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+.command-bar__input::placeholder { color: var(--text-faint); }
+.command-bar__input:focus { border-color: rgba(185, 168, 255, 0.45); }
+.command-bar__input:disabled { opacity: 0.6; }
+
+.command-bar__current {
+  justify-self: end;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+  font-family: var(--font-text);
+  font-size: 12.5px;
+  color: var(--text);
+}
+.command-bar__label { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.26em; color: var(--text-faint); }
+.command-bar__notice { color: var(--amber); }
+
+.hud-console-link {
+  position: absolute;
+  top: clamp(24px, 6.8vh, 72px);
+  right: var(--edge);
+  z-index: 3;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  color: var(--text-faint);
+  text-decoration: none;
+}
+.hud-console-link:hover { color: var(--text); }
+
+/* ── Smaller windows ─────────────────────────────────────────────────────── */
+
+@media (max-width: 1100px) {
+  .command-bar { grid-template-columns: auto minmax(220px, 1fr); }
+  .command-bar__current { display: none; }
+}
+
+@media (max-width: 860px) {
+  .hud-vignette { background: linear-gradient(to top, rgba(3, 3, 3, 0.85) 0%, rgba(3, 3, 3, 0) 42%); }
+  .hud-panel--right { display: none; }
+  /* Conversation fills the space between the status block and the command bar */
+  .hud-panel--left {
+    top: auto;
+    left: var(--edge);
+    right: var(--edge);
+    width: auto;
+    bottom: 132px;
+    height: max(0px, calc(40vh - 230px));
+  }
+  .hud-panel--left .hud-panel__title { display: none; }
+  .command-bar { grid-template-columns: 1fr; gap: 12px; bottom: 16px; }
+  .command-bar__indicators { justify-content: center; }
+}
+
+@media (max-height: 620px) {
+  .hud-panel { top: 84px; bottom: 84px; }
+}
