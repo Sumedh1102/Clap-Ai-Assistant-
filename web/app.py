@@ -176,13 +176,15 @@ def api_chat():
     result = get_session().handle(message, source="web", wait=True)
     if result.ok:
         return jsonify({
+            "ok": True,
             "reply": result.reply,
             "message_id": result.message_id,
             "spoken": result.spoken,
             "voice_error": result.error or None,
         })
-    status = 409 if "still working" in result.error else 503
-    return jsonify({"error": result.error, "message_id": result.message_id}), status
+    # The request was handled; the command's outcome is an assistant-level error
+    # (already shown in the HUD via the event stream), so this is not an HTTP error.
+    return jsonify({"ok": False, "error": result.error, "message_id": result.message_id})
 
 
 @app.route("/api/chat/history", methods=["GET"])

@@ -36,8 +36,8 @@ class WebTest(unittest.TestCase):
         fake.handle.return_value = TurnResult(ok=False, error="CLAP cannot reach the AI service.")
         with mock.patch.object(webapp, "get_session", return_value=fake):
             r = self.client.post("/api/chat", json={"message": "hi"})
-        self.assertEqual(r.status_code, 503)
-        self.assertEqual(r.get_json(), {"error": "CLAP cannot reach the AI service.", "message_id": None})
+        self.assertEqual(r.status_code, 200)  # handled outcome, not an HTTP failure
+        self.assertEqual(r.get_json(), {"ok": False, "error": "CLAP cannot reach the AI service.", "message_id": None})
 
     def test_chat_requires_message(self):
         self.assertEqual(self.client.post("/api/chat", json={}).status_code, 400)

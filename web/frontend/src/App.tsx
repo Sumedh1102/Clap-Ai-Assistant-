@@ -29,9 +29,9 @@ export default function App() {
         });
         const data = await res.json().catch(() => ({}));
         // The event stream normally delivers the reply; this covers a dropped stream.
-        if (res.ok && data.reply && data.message_id != null) {
+        if (data.ok && data.reply && data.message_id != null) {
           addLocalMessage({ id: data.message_id, role: "assistant", text: data.reply, source: "web", ts: Date.now() / 1000 });
-        } else if (!res.ok && data.error) {
+        } else if (data.error) {
           // Same id as the server-side event when there is one, so it is never shown twice.
           const id = data.message_id ?? -Date.now();
           addLocalMessage({ id, role: "system", text: data.error, source: "web", ts: Date.now() / 1000 });
