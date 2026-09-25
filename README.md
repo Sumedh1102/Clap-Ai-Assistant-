@@ -2,8 +2,8 @@
 ### Personal AI assistant
 
 CLAP is a voice-first personal AI assistant for macOS. Say **"CLAP"**, give a command,
-and it reasons with Claude, acts through real tools (apps, browser, search, tasks,
-email, memory) and answers in its own voice. A cinematic HUD built around the ThreeUI
+and it reasons with Google Gemini, acts through real tools (apps, browser, search,
+tasks, email, memory) and answers in its own voice. A cinematic HUD built around the ThreeUI
 **Predictive Arc** shows what CLAP is doing at every moment.
 
 ---
@@ -19,7 +19,7 @@ email, memory) and answers in its own voice. A cinematic HUD built around the Th
 | 🌐 **Browser automation** | Navigate, read, click, fill and screenshot via Playwright |
 | 🔍 **Web search** | Live results via Brave Search (optional) |
 | ✅ **Tasks** | Create, update, complete and delete tasks (SQLite) |
-| 🧠 **Memory** | Knowledge base of notes, documents and imported Claude chats (SQLite FTS5) |
+| 🧠 **Memory** | Knowledge base of notes, documents and imported Claude.ai chat exports (SQLite FTS5) |
 | 📧 **Email** | Send via Gmail SMTP, with attachments (optional) |
 | ☀️ **Daily briefing** | Scheduled morning summary and overdue-task reminders |
 | 🪟 **Overlay** | Small floating status overlay in voice mode |
@@ -41,7 +41,10 @@ email, memory) and answers in its own voice. A cinematic HUD built around the Th
           │    └── live events ───┤  server-sent events (/api/events)
           └───── commands ───────►│  POST /api/chat
                                   │
-                                Claude  (agent.py — tool-use loop)
+                             CLAP Agent  (agent.py — provider-neutral tool loop)
+                                  │
+                         AI provider (ai/) ── Google Gemini (ai/gemini.py, google-genai)
+                                  │   function calls ⇄ real tool results
                                   │
             ┌─────────────┬───────┼────────┬─────────────┐
             │             │       │        │             │
@@ -58,7 +61,7 @@ MICROPHONE (one persistent stream)
    ↓  record until silence
    ↓  Whisper STT                                                 HUD: THINKING (Transcribing)
    ↓  session.handle()      session.py                            HUD: THINKING
-   ↓  Claude + tools        agent.py                              HUD: EXECUTING ⇄ THINKING
+   ↓  Gemini + tools        agent.py → ai/gemini.py               HUD: EXECUTING ⇄ THINKING
    ↓  reply text
    ↓  voice.speak()         voice/ (ElevenLabs → afplay)          HUD: SPEAKING (only while audio plays)
    ↓                                                              HUD: STANDBY
@@ -73,7 +76,11 @@ the web HUD and the floating overlay both subscribe to. No state is simulated wi
 ```
 clap.py                 Entry point: CLI / --voice / --web
 jarvis.py               Compatibility shim (runs clap.py)
-agent.py                Claude tool-use loop, CLAP system prompt, error mapping
+agent.py                Tool loop, tool catalogue, CLAP system prompt (provider-neutral)
+ai/                     AI provider layer
+  base.py               AIProvider interface + neutral message/tool-call types
+  gemini.py             Google Gemini provider: schemas, history adapter, errors
+  __main__.py           python -m ai check | models
 session.py              Shared pipeline for voice, HUD and scheduler → real state events
 events.py               Event hub: state, conversation, tool activity, mic, voice
 config.py               .env loader + typed settings
@@ -107,13 +114,13 @@ docs/                   THREEUI_VERIFICATION.md · VOICE.md
 
 ```bash
 uname -m            # arm64
-python3 --version   # 3.10+ recommended (Homebrew: brew install python@3.12)
+python3 --version   # 3.10+ required (Homebrew: brew install python@3.12)
 node --version      # 20.19+ (Homebrew: brew install node)
 ```
 
-Apple's built-in `/usr/bin/python3` (3.9) also works, but pip then installs an older
-Anthropic SDK. The floating overlay needs Tk: with Homebrew Python, run
-`brew install python-tk@3.12`, or use `--no-overlay`.
+Apple's built-in `/usr/bin/python3` is 3.9, which the Google GenAI SDK does not support;
+use Homebrew Python. The floating overlay needs Tk: `brew install python-tk@3.12`, or use
+`--no-overlay`.
 
 ## Setup
 
@@ -136,20 +143,32 @@ npm install
 npm run build        # builds web/frontend/dist, served by the backend at :7777
 ```
 
-### 3. Configure
+### 3. Gemini API key (CLAP's AI)
+
+1. Open [Google AI Studio → API keys](https://aistudio.google.com/apikey) and sign in.
+2. **Create API key.** No credit card or Cloud billing is needed for the free tier.
+3. Put it in `.env` (never in code):
 
 ```bash
 cp .env.example .env
+# edit .env:  GEMINI_API_KEY=your-key
+python -m ai check     # one small request: confirms key + model
+python -m ai models    # lists the Gemini models your key can use
 ```
+
+CLAP uses the Gemini Developer API with your key only. It never enables Vertex AI or
+Google Cloud billing.
+
+### 4. Configure
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | ✅ | Claude. Get a key at [console.anthropic.com](https://console.anthropic.com) |
+| `GEMINI_API_KEY` | ✅ | Google Gemini, CLAP's AI ([aistudio.google.com/apikey](https://aistudio.google.com/apikey)) |
+| `GEMINI_MODEL` | optional | Gemini model ID (default `gemini-3.5-flash`; see `python -m ai models`) |
 | `CLAP_TTS_API_KEY` | for voice | ElevenLabs API key |
 | `CLAP_TTS_VOICE_ID` | for voice | ID of the CLAP voice in your ElevenLabs account (see below) |
 | `CLAP_TTS_MODEL_ID` | optional | `eleven_multilingual_v2` (default) or `eleven_flash_v2_5` (lower latency) |
 | `CLAP_TTS_PROVIDER` | optional | `elevenlabs` (default when key and voice are set), `macos` (explicit approximation), `none` |
-| `CLAP_MODEL` | optional | Claude model ID (default `claude-opus-4-6`) |
 | `BRAVE_API_KEY` | optional | Web search ([api.search.brave.com](https://api.search.brave.com), free tier) |
 | `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD` | optional | Email ([App Password](https://myaccount.google.com/apppasswords)) |
 | `DEFAULT_EMAIL` | optional | Default recipient |
@@ -160,7 +179,7 @@ cp .env.example .env
 
 `.env` is git-ignored. No key is ever sent to the browser.
 
-### 4. CLAP's voice
+### 5. CLAP's voice
 
 CLAP speaks with the ElevenLabs Voice Library voice **"Serafina – Sensual Temptress"**,
 the voice in the reference recording. See [docs/VOICE.md](docs/VOICE.md) for the
@@ -220,7 +239,7 @@ see what your microphone picks up.
 |---|---|---|
 | STANDBY | CLAP ONLINE | ready; wake word armed |
 | LISTENING | LISTENING... | wake word detected, command audio being captured |
-| THINKING | PROCESSING... | Whisper transcribing / Claude reasoning |
+| THINKING | PROCESSING... | Whisper transcribing / Gemini reasoning |
 | EXECUTING | EXECUTING ACTION... | a tool is running (tool + action shown) |
 | SPEAKING | RESPONDING... | reply audio is playing |
 | ERROR | SYSTEM ERROR | AI service unreachable, voice failure, mic failure |
@@ -244,7 +263,7 @@ need no extra permissions.
 
 ## Autostart
 
-Only after CLAP works from Terminal (voice, HUD and Claude):
+Only after CLAP works from Terminal (voice, HUD and Gemini):
 
 ```bash
 python autostart.py install          # voice mode + HUD on login
@@ -258,7 +277,39 @@ This also removes the old `com.jarvis.assistant` agent if present. Logs:
 ## Optional integrations
 
 Search, email and voice are optional. When one is missing CLAP starts normally and
-says so when asked (e.g. "Search is not configured.").
+says so when asked (e.g. "Search is not configured."). Web search stays on Brave; it
+does not use Gemini's built-in Google Search.
+
+## How CLAP uses Gemini
+
+- **Function calling.** CLAP's 20 tools are declared to Gemini as functions (JSON Schema,
+  same names as before). When Gemini asks for one, CLAP runs the real tool, sends the real
+  result back (failures included), and repeats until Gemini answers. Automatic function
+  calling is off, so every call goes through CLAP's own loop, and the HUD shows EXECUTING
+  for each one.
+- **One client.** A single `google-genai` client is created per process with a 60 s
+  timeout. Transient 5xx errors are retried up to twice. 429s are not retried, so a retry
+  loop never burns quota.
+- **Provider-neutral core.** Only `ai/gemini.py` knows Gemini's formats. The agent,
+  memory (SQLite), HUD, voice and tools use plain `{role, content}` messages, so another
+  provider can be added by implementing `ai.base.AIProvider`.
+
+### Free tier and rate limits
+
+The Gemini API free tier has per-minute and per-day request limits that depend on the
+model and your account; see Google's rate-limit page. It is not unlimited. Each CLAP
+command uses one request, plus one more for every round of tool calls (a simple "open
+Spotify" is usually 2 requests). When a limit is hit, CLAP shows and speaks a clear
+message instead of failing:
+
+| Situation | CLAP says |
+|---|---|
+| Per-minute limit | "Gemini quota has been reached. Try again in N seconds." |
+| Daily limit | "Gemini's daily quota has been reached. Please try again later." |
+| Model has no free-tier quota on your key | "The Gemini model … has no free-tier quota for this key. Set GEMINI_MODEL …" |
+
+To use fewer requests or a model with higher free limits, set `GEMINI_MODEL` (for
+example `gemini-3.1-flash-lite`) after checking `python -m ai models`.
 
 ## Tests
 
@@ -266,9 +317,12 @@ says so when asked (e.g. "Search is not configured.").
 python -m unittest discover -s tests -t .
 ```
 
-The suite covers the tool-use loop (scripted Claude responses), honest tool failures,
-state sequencing, the SSE stream, the ElevenLabs request contract (mock server), the
-voice pipeline (simulated microphone), app control and wake-word matching. Browser tests
+The suite covers the provider-neutral tool loop (scripted provider), the real
+`google-genai` SDK against a local server speaking the Gemini REST format (function
+calls, thought signatures, parallel calls, quota / key / overload errors), honest tool
+failures, state sequencing, the SSE stream, the ElevenLabs request contract (mock
+server), the voice pipeline (simulated microphone), app control and wake-word matching.
+No test calls the real Gemini API. Browser tests
 run when `CLAP_TEST_BROWSER=1` is set (after `playwright install chromium`).
 
 ## Troubleshooting
@@ -277,7 +331,12 @@ run when `CLAP_TEST_BROWSER=1` is set (after `playwright install chromium`).
 |---|---|
 | HUD says "has not been built yet" | `npm install && npm run build` |
 | HUD shows LINK OFFLINE | Start the backend (`python clap.py --web` or `--voice`) and check `WEB_PORT` |
-| "CLAP cannot reach the AI service." | Check `ANTHROPIC_API_KEY` and your network; details in `logs/clap.log` |
+| "Missing required environment variables: GEMINI_API_KEY" | Add `GEMINI_API_KEY` to `.env` |
+| "The Gemini API key is invalid." | Create a new key in AI Studio; check for stray spaces or quotes in `.env` |
+| "Gemini quota has been reached…" | Wait, or switch `GEMINI_MODEL`; see *Free tier and rate limits* |
+| "The Gemini model … is not available." | Run `python -m ai models` and set `GEMINI_MODEL` to one listed |
+| "The Gemini API is not available in your region." | Gemini API region restrictions apply |
+| "CLAP cannot reach the AI service." | Check your network; details in `logs/clap.log` (keys are redacted) |
 | "Voice output is currently unavailable." | Set `CLAP_TTS_API_KEY` / `CLAP_TTS_VOICE_ID`; run `python -m voice test` |
 | Wake word never triggers | Microphone permission; try "Hey CLAP"; run `python debug_voice.py` |
 | "Browser automation is unavailable" | `playwright install chromium` |
@@ -289,7 +348,7 @@ run when `CLAP_TEST_BROWSER=1` is set (after `playwright install chromium`).
 
 | Layer | Technology |
 |---|---|
-| Reasoning | Anthropic Claude via tool use (`anthropic` SDK) |
+| Reasoning | Google Gemini via function calling (`google-genai` SDK, Gemini Developer API) |
 | Wake word & STT | `faster-whisper` (local) + `sounddevice` |
 | Voice | ElevenLabs TTS (CLAP voice) → `afplay` |
 | HUD | React 19 + TypeScript + Vite, ThreeUI `PredictiveArcCanvas` (`@designcodeio/threeui` 1.2.0) |
