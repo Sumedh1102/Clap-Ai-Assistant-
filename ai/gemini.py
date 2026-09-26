@@ -158,8 +158,10 @@ def to_clap_error(exc: Exception, model: str) -> ClapAIError:
         message, details = str(exc.message or ""), _details_text(exc)
         if "API_KEY_INVALID" in details or "API key not valid" in message or "API key expired" in message:
             return ClapAIError("The Gemini API key is invalid.")
-        # Keys that are not Gemini API keys (e.g. restricted Google Cloud keys).
-        if "API_KEY_SERVICE_BLOCKED" in details or "API keys are not supported by this API" in message:
+        # Keys that are not Gemini API keys (e.g. Google Cloud "AQ." keys): Google
+        # reports these as API_KEY_SERVICE_BLOCKED or ACCESS_TOKEN_TYPE_UNSUPPORTED.
+        if ("API_KEY_SERVICE_BLOCKED" in details or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in details
+                or "API keys are not supported by this API" in message):
             return ClapAIError(
                 "This API key cannot be used with the Gemini API. "
                 "Create a Gemini API key in Google AI Studio.")
